@@ -1,14 +1,27 @@
 import { Stack, useSegments, useRouter } from "expo-router";
-import { PaperProvider } from "react-native-paper";
+import { PaperProvider, MD3LightTheme } from "react-native-paper";
 import { AuthProvider } from "../contexts/AuthContext";
 import { View, Text } from "react-native";
 import { useAuth } from "../contexts/AuthContext";
 import { useEffect } from "react";
+import { WorkoutProvider } from "../contexts/WorkoutContext";
+import { AITrainerProvider } from "../contexts/AITrainerContext";
+
+// Define the theme
+const theme = {
+  ...MD3LightTheme,
+  colors: {
+    ...MD3LightTheme.colors,
+    primary: "#2196F3",
+    secondary: "#1976D2",
+    background: "#F5F5F5",
+  },
+};
 
 function useProtectedRoute() {
-  const { session, loading, hasCompletedProfile } = useAuth();
   const segments = useSegments();
   const router = useRouter();
+  const { session, loading, hasCompletedProfile } = useAuth();
 
   useEffect(() => {
     const inAuthGroup = segments[0] === "(auth)";
@@ -27,53 +40,43 @@ function useProtectedRoute() {
       if (!session && !inAuthGroup) {
         // Redirect to sign in if not authenticated
         router.replace("/(auth)/welcome");
-      } else if (session && !hasCompletedProfile && segments[1] !== "profile") {
+      } else if (session && !hasCompletedProfile && segments[0] !== "profile") {
         // Redirect to profile completion if needed
         router.replace("/(auth)/profile/profession");
       } else if (session && hasCompletedProfile && !inAppGroup) {
-        // Redirect to main app if authenticated and profile complete
+        // Redirect to app if authenticated and profile completed
         router.replace("/(app)");
       }
     }
-  }, [session, loading, hasCompletedProfile, segments]);
+  }, [session, loading, segments, hasCompletedProfile]);
+
+  return loading;
 }
 
 function RootLayoutNav() {
-  const { loading } = useAuth();
-  const segments = useSegments();
-  useProtectedRoute();
+  const loading = useProtectedRoute();
 
-  const initializing = loading && segments.length === 0;
-  const content = (
+  if (loading) {
+    return null; // Or a loading screen
+  }
+
+  return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="(auth)" />
       <Stack.Screen name="(app)" />
     </Stack>
   );
-
-  if (initializing) {
-    return (
-      <View
-        style={{
-          flex: 1,
-          justifyContent: "center",
-          alignItems: "center",
-          backgroundColor: "#fff",
-        }}
-      >
-        <Text>Initializing...</Text>
-      </View>
-    );
-  }
-
-  return content;
 }
 
 export default function RootLayout() {
   return (
     <AuthProvider>
-      <PaperProvider>
-        <RootLayoutNav />
+      <PaperProvider theme={theme}>
+        <WorkoutProvider>
+          <AITrainerProvider>
+            <RootLayoutNav />
+          </AITrainerProvider>
+        </WorkoutProvider>
       </PaperProvider>
     </AuthProvider>
   );

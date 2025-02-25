@@ -44,6 +44,15 @@ export default function TabsLayout() {
           ),
         }}
       />
+      <Tabs.Screen
+        name="ai-trainer"
+        options={{
+          title: "AI Trainer",
+          tabBarIcon: ({ color, size }) => (
+            <MaterialCommunityIcons name="robot" size={size} color={color} />
+          ),
+        }}
+      />
     </Tabs>
   );
 }

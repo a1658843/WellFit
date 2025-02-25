@@ -1,101 +1,92 @@
-import { View, StyleSheet, ScrollView } from "react-native";
-import { Button, Text, Card, Chip, TextInput } from "react-native-paper";
+import React, { useState } from "react";
+import { View, StyleSheet, ScrollView, SafeAreaView } from "react-native";
+import { Button, Text, Card, TextInput } from "react-native-paper";
 import { useRouter } from "expo-router";
-import { useState, useEffect } from "react";
-import { supabase } from "../../../lib/supabase";
+import { useAITrainer } from "../../../contexts/AITrainerContext";
 import { useAuth } from "../../../contexts/AuthContext";
-
-type Exercise = {
-  id: string;
-  name: string;
-  description: string;
-  duration: string;
-  duration_minutes: number;
-  difficulty_level: string;
-  target_areas: string[];
-};
+import { useLocalSearchParams } from "expo-router";
+import { supabase } from "../../../lib/supabase";
 
 export default function CreateWorkout() {
-  const [exercises, setExercises] = useState<Exercise[]>([]);
-  const [selectedExercises, setSelectedExercises] = useState<Exercise[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState("");
   const router = useRouter();
+  const { type } = useLocalSearchParams();
   const { session } = useAuth();
+  const { generateWorkoutPlan } = useAITrainer();
+  const [prompt, setPrompt] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    loadExercises();
-  }, []);
-
-  const loadExercises = async () => {
-    try {
-      const { data, error } = await supabase
-        .from("exercises")
-        .select("*")
-        .order("name");
-
-      if (error) throw error;
-      setExercises(data || []);
-    } catch (error) {
-      console.error("Error loading exercises:", error);
-    } finally {
-      setLoading(false);
+  const generatePromptTemplate = () => {
+    if (type === "work") {
+      return "I need some quick exercises I can do at my desk during work.";
     }
+    return "I want a workout plan that includes: ";
   };
 
-  const addExercise = (exercise: Exercise) => {
-    setSelectedExercises((prev) => {
-      // Check if already added
-      if (prev.some((e) => e.id === exercise.id)) {
-        return prev.filter((e) => e.id !== exercise.id);
-      }
-      // Add to selected exercises
-      return [...prev, exercise];
-    });
+  const getPromptPlaceholder = () => {
+    if (type === "work") {
+      return "E.g., stretches for my back, exercises for wrist pain";
+    }
+    return "E.g., upper body focus, using dumbbells, 30 minutes";
   };
-
-  const filteredExercises = exercises.filter((exercise) =>
-    exercise.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
 
   const handleCreateWorkout = async () => {
-    if (!selectedExercises.length || !session?.user) return;
+    if (!prompt.trim()) return;
 
     try {
       setLoading(true);
 
-      // First create the workout
-      const { data: workout, error: workoutError } = await supabase
-        .from("workouts")
-        .insert([
+      // Create a structured workout plan
+      const workoutPlan = {
+        title: type === "work" ? "Work Break Exercises" : "Exercise Workout",
+        type: type as "work" | "exercise",
+        exercises: [
           {
-            user_id: session.user.id,
-            type: "custom",
+            name: "Upper Body Workout",
+            description: "A series of upper body strengthening exercises",
+            sets: 3,
+            reps: 12,
+            duration_minutes: type === "work" ? 5 : 30,
+            target_areas: ["upper body"],
+            is_work_friendly: type === "work",
             completed: false,
           },
-        ])
+        ],
+      };
+
+      // Create the workout in the database
+      const { data: workout, error: workoutError } = await supabase
+        .from("workouts")
+        .insert({
+          user_id: session?.user?.id,
+          title: workoutPlan.title,
+          type: workoutPlan.type,
+          completed: false,
+        })
         .select()
         .single();
 
-      if (workoutError) throw workoutError;
+      if (workoutError || !workout) throw workoutError;
 
-      // Then create workout exercises
-      const workoutExercises = selectedExercises.map((exercise) => ({
-        workout_id: workout.id,
-        exercise_id: exercise.id,
-        sets: 3, // Default values
-        reps: 10,
-        completed: false,
-      }));
-
+      // Add exercises to the workout
       const { error: exercisesError } = await supabase
         .from("workout_exercises")
-        .insert(workoutExercises);
+        .insert(
+          workoutPlan.exercises.map((exercise) => ({
+            workout_id: workout.id,
+            name: exercise.name,
+            description: exercise.description,
+            sets: exercise.sets,
+            reps: exercise.reps,
+            duration_minutes: exercise.duration_minutes,
+            target_areas: exercise.target_areas,
+            completed: false,
+          }))
+        );
 
       if (exercisesError) throw exercisesError;
 
-      // Navigate to the workout details screen
-      router.replace(`/(app)/workout/${workout.id}`);
+      // Navigate to the workout
+      router.replace(`/workout/${workout.id}`);
     } catch (error) {
       console.error("Error creating workout:", error);
       alert("Failed to create workout. Please try again.");
@@ -105,106 +96,82 @@ export default function CreateWorkout() {
   };
 
   return (
-    <View style={styles.container}>
-      <TextInput
-        placeholder="Search exercises..."
-        value={searchQuery}
-        onChangeText={setSearchQuery}
-        style={styles.searchInput}
-      />
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView style={styles.container}>
+        <Card style={styles.card}>
+          <Card.Content>
+            <Text variant="titleMedium">
+              {type === "work" ? "Create Work Session" : "Create Workout Plan"}
+            </Text>
+            <Text variant="bodyMedium" style={styles.description}>
+              {type === "work"
+                ? "Describe what kind of exercises you'd like to do during work."
+                : "Describe your workout preferences and I'll create a plan for you."}
+            </Text>
+            <TextInput
+              mode="outlined"
+              multiline
+              numberOfLines={4}
+              placeholder={getPromptPlaceholder()}
+              value={prompt}
+              onChangeText={setPrompt}
+              style={styles.input}
+            />
+            <Button
+              mode="contained"
+              onPress={handleCreateWorkout}
+              loading={loading}
+              disabled={loading || !prompt.trim()}
+              style={styles.button}
+            >
+              {loading ? "Creating..." : "Create Plan"}
+            </Button>
+          </Card.Content>
+        </Card>
 
-      <ScrollView style={styles.exerciseList}>
-        {filteredExercises.map((exercise) => (
-          <Card
-            key={exercise.id}
-            style={[
-              styles.exerciseCard,
-              selectedExercises.some((e) => e.id === exercise.id) &&
-                styles.selectedCard,
-            ]}
-          >
-            <Card.Title title={exercise.name} />
-            <Card.Content>
-              <Text variant="bodyMedium">{exercise.description}</Text>
-              <View style={styles.tags}>
-                <Chip icon="clock">{exercise.duration}</Chip>
-                <Chip icon="weight-lifter">{exercise.difficulty_level}</Chip>
-              </View>
-              <View style={styles.tags}>
-                {exercise.target_areas.map((area) => (
-                  <Chip key={area} icon="target">
-                    {area}
-                  </Chip>
-                ))}
-              </View>
-              <Button
-                mode={
-                  selectedExercises.some((e) => e.id === exercise.id)
-                    ? "outlined"
-                    : "contained"
-                }
-                onPress={() => addExercise(exercise)}
-                style={styles.addButton}
-              >
-                {selectedExercises.some((e) => e.id === exercise.id)
-                  ? "Remove"
-                  : "Add"}
-              </Button>
-            </Card.Content>
-          </Card>
-        ))}
+        <Card style={styles.tipsCard}>
+          <Card.Content>
+            <Text variant="titleSmall">Tips for better results:</Text>
+            <Text style={styles.tip}>• Mention your fitness level</Text>
+            <Text style={styles.tip}>• Specify available equipment</Text>
+            <Text style={styles.tip}>• Include time constraints</Text>
+            <Text style={styles.tip}>• Mention any focus areas</Text>
+          </Card.Content>
+        </Card>
       </ScrollView>
-
-      <View style={styles.footer}>
-        <Text variant="bodyMedium">
-          Selected: {selectedExercises.length} exercises
-        </Text>
-        <Button
-          mode="contained"
-          onPress={handleCreateWorkout}
-          disabled={selectedExercises.length === 0}
-          loading={loading}
-        >
-          Create Workout
-        </Button>
-      </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  safeArea: {
     flex: 1,
     backgroundColor: "#f5f5f5",
   },
-  searchInput: {
-    margin: 15,
-    backgroundColor: "white",
-  },
-  exerciseList: {
+  container: {
     flex: 1,
-    padding: 15,
   },
-  exerciseCard: {
-    marginBottom: 10,
+  card: {
+    margin: 15,
   },
-  selectedCard: {
-    backgroundColor: "#e3f2fd",
+  description: {
+    marginTop: 10,
+    marginBottom: 15,
+    opacity: 0.7,
   },
-  tags: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
+  input: {
+    marginBottom: 15,
+  },
+  button: {
     marginTop: 10,
   },
-  footer: {
-    padding: 15,
-    backgroundColor: "white",
-    borderTopWidth: 1,
-    borderTopColor: "#eee",
-    gap: 10,
+  tipsCard: {
+    margin: 15,
+    marginTop: 0,
+    backgroundColor: "#E3F2FD",
   },
-  addButton: {
-    marginTop: 10,
+  tip: {
+    marginTop: 5,
+    opacity: 0.7,
   },
 });

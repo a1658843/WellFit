@@ -4,283 +4,435 @@
 // - Exercise recommendations
 // - Quick logging
 
+import React, { useState, useEffect } from "react";
 import { View, StyleSheet, ScrollView, SafeAreaView } from "react-native";
-import { Text, Surface, Button, Card, ProgressBar } from "react-native-paper";
+import {
+  Text,
+  Surface,
+  Button,
+  Card,
+  ProgressBar,
+  List,
+  IconButton,
+  Divider,
+  TouchableRipple,
+} from "react-native-paper";
 import { useAuth } from "../../../contexts/AuthContext";
-import { useState, useEffect, useCallback } from "react";
+import { useRouter } from "expo-router";
+import { Workout } from "../../../types/database";
+import { ProfessionData } from "../../../data/professions";
+import { useAITrainer } from "../../../contexts/AITrainerContext";
 import { supabase } from "../../../lib/supabase";
-import { useRouter, useFocusEffect } from "expo-router";
-import { EventRegister } from "react-native-event-listeners";
-import { useWorkout } from "../../../contexts/WorkoutContext";
 
-type WorkSession = {
-  start_time: string;
-  end_time: string;
-  completed_exercises: number;
-  total_exercises: number;
+// Add type definitions for profession-specific exercises
+type ProfessionExercise = {
+  id: string;
+  name: string;
+  description: string;
+  duration_minutes: number;
+  reason: string;
+  recommended_frequency: string;
+  target_areas: string[];
 };
 
-// Add this type to track all exercises
-type WorkoutExercise = {
-  exercise: {
-    id: string;
-    name: string;
-    duration: string;
-    description: string;
-  };
-  completed: boolean;
-};
-
-export default function WorkMode() {
-  const { session } = useAuth();
+export default function WorkModeScreen() {
   const router = useRouter();
+  const { session } = useAuth();
+  const { getFeedbackForProfession, isLoading, error, clearError } =
+    useAITrainer();
+  const [activeWorkout, setActiveWorkout] = useState<Workout | null>(null);
   const [loading, setLoading] = useState(true);
   const [workSchedule, setWorkSchedule] = useState<{
     start: string;
     end: string;
-    days: string[];
+    days: number[];
   } | null>(null);
-  const [currentSession, setCurrentSession] = useState<WorkSession | null>(
-    null
-  );
-  const [nextExercise, setNextExercise] = useState<{
-    name: string;
-    duration: string;
-    description: string;
-  } | null>(null);
-  const [allExercises, setAllExercises] = useState<WorkoutExercise[]>([]);
-  const { refreshWorkMode } = useWorkout();
-  const [snackbarMessage, setSnackbarMessage] = useState<string>("");
-  const [showSnackbar, setShowSnackbar] = useState<boolean>(false);
-
-  useFocusEffect(
-    useCallback(() => {
-      if (session?.user) {
-        Promise.all([loadWorkSchedule(), loadCurrentSession()]).finally(() =>
-          setLoading(false)
-        );
-      }
-    }, [session])
-  );
+  const [timeUntilNext, setTimeUntilNext] = useState<string>("");
+  const [nextExercise, setNextExercise] = useState<string>("");
+  const [breaksTaken, setBreaksTaken] = useState(0);
+  const [activeMinutes, setActiveMinutes] = useState(0);
+  const [todaysExercises, setTodaysExercises] = useState<string[]>([]);
+  const [userProfession, setUserProfession] = useState<string>("");
+  const [professionExercises, setProfessionExercises] = useState<
+    ProfessionExercise[]
+  >([]);
+  const [professionIssues, setProfessionIssues] = useState<any[]>([]);
+  const [professionData, setProfessionData] = useState<ProfessionData | null>({
+    name: "",
+    category: "",
+    physical_demands: [],
+    workplace_environment: "",
+    common_issues: [],
+    recommended_exercises: [],
+  });
+  const [feedback, setFeedback] = useState<string>("");
 
   useEffect(() => {
     if (session?.user) {
+      loadUserProfession();
       loadWorkSchedule();
+      loadTodaysProgress();
+      loadProfessionFeedback();
     }
   }, [session]);
 
-  // Replace the event listener with context
-  useEffect(() => {
-    if (session?.user) {
-      loadCurrentSession();
-    }
-  }, [session, refreshWorkMode]);
-
-  const loadWorkSchedule = async () => {
+  const loadUserProfession = async () => {
     try {
+      setLoading(true);
       const { data, error } = await supabase
         .from("users")
-        .select("work_schedule")
-        .eq("id", session?.user.id)
+        .select("profession_data")
+        .eq("id", session?.user?.id)
         .single();
 
       if (error) throw error;
-      setWorkSchedule(data?.work_schedule);
+
+      if (data?.profession_data) {
+        setProfessionData(data.profession_data);
+        setUserProfession(data.profession_data.name);
+
+        if (data.profession_data.recommended_exercises) {
+          setProfessionExercises(
+            data.profession_data.recommended_exercises.map((exercise) => ({
+              id: exercise.name,
+              name: exercise.name,
+              description: exercise.description,
+              duration_minutes: parseInt(exercise.duration) || 5,
+              reason: exercise.description,
+              recommended_frequency: exercise.frequency,
+              target_areas: exercise.target_areas || [],
+            }))
+          );
+        }
+      }
+    } catch (error) {
+      console.error("Error loading profession:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadWorkSchedule = async () => {
+    try {
+      const { data: user, error } = await supabase
+        .from("users")
+        .select("work_schedule")
+        .eq("id", session?.user?.id)
+        .single();
+
+      if (error) throw error;
+      setWorkSchedule(user?.work_schedule);
     } catch (error) {
       console.error("Error loading work schedule:", error);
     }
   };
 
-  const loadCurrentSession = async () => {
+  const loadActiveWorkout = async () => {
     try {
-      // Create a UTC date at midnight for consistent comparison
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const todayISO = today.toISOString();
+      const { data, error } = await supabase
+        .from("workouts")
+        .select(
+          `
+          *,
+          workout_exercises (
+            id,
+            name,
+            description,
+            duration_minutes,
+            completed
+          )
+        `
+        )
+        .eq("user_id", session?.user?.id)
+        .eq("type", "work")
+        .eq("completed", false)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-      console.log("Loading session for date:", todayISO);
+      if (error) throw error;
+      setActiveWorkout(data);
+    } catch (error) {
+      console.error("Error loading active workout:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
+  const isWorkingHours = () => {
+    if (!workSchedule) return false;
+
+    const now = new Date();
+    const currentDay = now.getDay();
+    const currentTime = now.toLocaleTimeString("en-US", { hour12: false });
+
+    return (
+      workSchedule.days.includes(currentDay) &&
+      currentTime >= workSchedule.start &&
+      currentTime <= workSchedule.end
+    );
+  };
+
+  const createWorkModeWorkout = async () => {
+    try {
+      setLoading(true);
+
+      // Create a work session
+      const { data: session, error: sessionError } = await supabase
+        .from("work_sessions")
+        .insert([{ user_id: session?.user?.id }])
+        .select()
+        .single();
+
+      if (sessionError) throw sessionError;
+
+      // Create a work mode workout
+      const { data: workout, error: workoutError } = await supabase
+        .from("workouts")
+        .insert([
+          {
+            user_id: session?.user?.id,
+            title: `Work Session ${new Date().toLocaleDateString()}`,
+            type: "work",
+            completed: false,
+          },
+        ])
+        .select()
+        .single();
+
+      if (workoutError) throw workoutError;
+
+      // Add some default work-friendly exercises
+      const exercises = [
+        {
+          name: "Desk Stretches",
+          description: "Simple stretches you can do at your desk",
+          duration_minutes: 5,
+          is_work_friendly: true,
+          target_areas: ["back", "neck"],
+          completed: false,
+        },
+        {
+          name: "Standing Breaks",
+          description: "Stand up and walk around for a few minutes",
+          duration_minutes: 5,
+          is_work_friendly: true,
+          target_areas: ["legs", "circulation"],
+          completed: false,
+        },
+      ];
+
+      const { error: exercisesError } = await supabase
+        .from("workout_exercises")
+        .insert(
+          exercises.map((ex) => ({
+            ...ex,
+            workout_id: workout.id,
+          }))
+        );
+
+      if (exercisesError) throw exercisesError;
+
+      // Navigate to the workout
+      router.push(`/workout/${workout.id}`);
+    } catch (error) {
+      console.error("Error creating work session:", error);
+      alert("Failed to start work session. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Calculate time until next exercise break
+  const updateTimeUntilNext = () => {
+    if (!workSchedule) return;
+
+    const now = new Date();
+    const currentHour = now.getHours();
+    const currentMinute = now.getMinutes();
+
+    // Schedule breaks every 2 hours during work hours
+    const workStart = parseInt(workSchedule.start.split(":")[0]);
+    const workEnd = parseInt(workSchedule.end.split(":")[0]);
+
+    let nextBreakHour = workStart;
+    while (nextBreakHour <= workEnd) {
+      if (
+        nextBreakHour > currentHour ||
+        (nextBreakHour === currentHour && 0 > currentMinute)
+      ) {
+        break;
+      }
+      nextBreakHour += 2;
+    }
+
+    if (nextBreakHour <= workEnd) {
+      const minutesUntil = (nextBreakHour - currentHour) * 60 - currentMinute;
+      setTimeUntilNext(
+        `${Math.floor(minutesUntil / 60)}h ${minutesUntil % 60}m`
+      );
+      setNextExercise(getNextExercise(nextBreakHour));
+    } else {
+      setTimeUntilNext("Done for today");
+      setNextExercise("");
+    }
+  };
+
+  const getNextExercise = (hour: number) => {
+    const exercises = [
+      "Desk Stretches",
+      "Standing Break",
+      "Eye Relief",
+      "Posture Check",
+    ];
+    return exercises[hour % exercises.length];
+  };
+
+  // Add function to start a quick exercise
+  const startQuickExercise = async (exerciseName: string) => {
+    try {
+      setLoading(true);
+
+      // Create a new workout if needed
+      const { data: workout, error: workoutError } = await supabase
+        .from("workouts")
+        .insert([
+          {
+            user_id: session?.user?.id,
+            title: `Quick Exercise - ${new Date().toLocaleTimeString()}`,
+            type: "work",
+            completed: false,
+          },
+        ])
+        .select()
+        .single();
+
+      if (workoutError) throw workoutError;
+
+      // Add the exercise
+      const { error: exerciseError } = await supabase
+        .from("workout_exercises")
+        .insert([
+          {
+            workout_id: workout.id,
+            name: exerciseName,
+            description: `Quick ${exerciseName.toLowerCase()} break`,
+            duration_minutes: exerciseName === "Standing Break" ? 5 : 2,
+            completed: false,
+          },
+        ]);
+
+      if (exerciseError) throw exerciseError;
+
+      // Update local state
+      setBreaksTaken((prev) => prev + 1);
+      setActiveMinutes(
+        (prev) => prev + (exerciseName === "Standing Break" ? 5 : 2)
+      );
+      setTodaysExercises((prev) => [...prev, exerciseName]);
+
+      // Navigate to the exercise
+      router.push(`/workout/${workout.id}`);
+    } catch (error) {
+      console.error("Error starting quick exercise:", error);
+      alert("Failed to start exercise. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Load today's progress when component mounts
+  useEffect(() => {
+    if (session?.user) {
+      loadTodaysProgress();
+    }
+  }, [session]);
+
+  const loadTodaysProgress = async () => {
+    try {
+      const today = new Date().toISOString().split("T")[0];
+
+      // Get today's workouts
       const { data: workouts, error } = await supabase
         .from("workouts")
         .select(
           `
           id,
-          created_at,
-          completed,
           workout_exercises (
-            completed,
-            exercise:exercises (
-              id,
-              name,
-              duration,
-              description
-            )
+            name,
+            duration_minutes,
+            completed
           )
         `
         )
-        .eq("user_id", session?.user.id)
-        .gte("created_at", todayISO)
+        .eq("user_id", session?.user?.id)
+        .eq("type", "work")
+        .gte("created_at", today)
         .lt(
           "created_at",
-          new Date(today.getTime() + 24 * 60 * 60 * 1000).toISOString()
-        )
-        .order("created_at", { ascending: false });
-
-      console.log("Loaded workouts:", workouts);
+          new Date(new Date().setDate(new Date().getDate() + 1)).toISOString()
+        );
 
       if (error) throw error;
 
-      if (!workouts || workouts.length === 0) {
-        console.log("No workouts found for today");
-        setCurrentSession({
-          start_time: "9:00 AM",
-          end_time: "5:00 PM",
-          completed_exercises: 0,
-          total_exercises: 0,
-        });
-        setNextExercise(null);
-        setAllExercises([]);
-        return;
-      }
-
-      // Combine all exercises from today's workouts
-      const allExercises = workouts
-        .flatMap((w) => w.workout_exercises)
-        .map((we) => ({
-          exercise: we.exercise,
-          completed: we.completed,
-        }));
-
-      console.log("Processed exercises:", allExercises);
-
       // Calculate totals
-      const totalExercises = allExercises.length;
-      const completedExercises = allExercises.filter((e) => e.completed).length;
+      let breaks = 0;
+      let minutes = 0;
+      const exercises: string[] = [];
 
-      console.log("Exercise counts:", {
-        total: totalExercises,
-        completed: completedExercises,
-      });
-
-      setCurrentSession({
-        start_time: "9:00 AM",
-        end_time: "5:00 PM",
-        completed_exercises: completedExercises,
-        total_exercises: totalExercises,
-      });
-
-      setAllExercises(allExercises);
-
-      // Find next uncompleted exercise
-      const nextIncomplete = allExercises.find((e) => !e.completed);
-      if (nextIncomplete) {
-        setNextExercise({
-          name: nextIncomplete.exercise.name,
-          duration: nextIncomplete.exercise.duration,
-          description: nextIncomplete.exercise.description,
+      workouts?.forEach((workout) => {
+        workout.workout_exercises?.forEach((exercise) => {
+          if (exercise.completed) {
+            breaks++;
+            minutes += exercise.duration_minutes || 0;
+            exercises.push(exercise.name);
+          }
         });
-      } else {
-        setNextExercise(null);
-      }
+      });
+
+      setBreaksTaken(breaks);
+      setActiveMinutes(minutes);
+      setTodaysExercises(exercises);
     } catch (error) {
-      console.error("Error loading workout:", error);
+      console.error("Error loading today's progress:", error);
     }
   };
 
-  const loadNextExercise = async () => {
-    // TODO: Implement AI-based exercise selection
-    setNextExercise({
-      name: "Desk Stretches",
-      duration: "5 minutes",
-      description: "Simple stretches to relieve tension",
-    });
-  };
-
-  const handleStartExercise = async () => {
+  const loadProfessionFeedback = async () => {
     try {
-      // Get the exercise ID
-      const { data: exercise, error } = await supabase
-        .from("exercises")
-        .select("id")
-        .eq("name", nextExercise?.name)
+      const { data, error } = await supabase
+        .from("users")
+        .select("profession_data")
+        .eq("id", session.user.id)
         .single();
 
       if (error) throw error;
-
-      // Navigate to exercise detail screen with workout ID
-      router.push({
-        pathname: `/workout/exercise-detail`,
-        params: {
-          id: exercise.id,
-          workout_id: currentSession?.id,
-        },
-      });
+      if (data?.profession_data?.name) {
+        const response = await getFeedbackForProfession(
+          data.profession_data.name
+        );
+        setFeedback(response.content);
+      }
     } catch (error) {
-      console.error("Error starting exercise:", error);
-      alert("Failed to start exercise. Please try again.");
+      console.error("Error loading profession feedback:", error);
     }
-  };
-
-  const handleDeleteExercise = async (exerciseId: string) => {
-    if (!session?.user) return;
-
-    try {
-      // Remove the exercise from the workout_exercises table
-      const { error } = await supabase
-        .from("workout_exercises")
-        .delete()
-        .eq("workout_id", currentSession?.id)
-        .eq("exercise_id", exerciseId);
-
-      if (error) throw error;
-
-      // Update the local state to reflect the deletion
-      setAllExercises((prev) =>
-        prev.filter((ex) => ex.exercise.id !== exerciseId)
-      );
-
-      setSnackbarMessage("Exercise removed successfully!");
-      setShowSnackbar(true);
-    } catch (error) {
-      console.error("Error deleting exercise:", error);
-      setSnackbarMessage("Failed to remove exercise. Please try again.");
-      setShowSnackbar(true);
-    }
-  };
-
-  const renderExerciseList = () => {
-    if (!allExercises.length) return null;
-
-    return (
-      <Card style={styles.card}>
-        <Card.Title title="Today's Exercises" />
-        <Card.Content>
-          {allExercises.map((ex) => (
-            <View key={ex.exercise.id} style={styles.exerciseItem}>
-              <Text variant="bodyMedium">
-                {ex.exercise.name} {ex.completed ? "✓" : ""}
-              </Text>
-              <Text variant="bodySmall" style={styles.exerciseDetail}>
-                {ex.exercise.duration}
-              </Text>
-              <Button
-                mode="outlined"
-                onPress={() => handleDeleteExercise(ex.exercise.id)}
-                style={styles.deleteButton}
-              >
-                Delete
-              </Button>
-            </View>
-          ))}
-        </Card.Content>
-      </Card>
-    );
   };
 
   if (loading) {
     return (
-      <View style={[styles.container, styles.centered]}>
-        <Text>Loading work mode...</Text>
+      <View style={styles.container}>
+        <Text>Loading...</Text>
+      </View>
+    );
+  }
+
+  if (!professionData) {
+    return (
+      <View style={styles.container}>
+        <Text>Please set your profession in profile settings</Text>
+        <Button onPress={() => router.push("/profile/edit")}>
+          Update Profile
+        </Button>
       </View>
     );
   }
@@ -288,77 +440,125 @@ export default function WorkMode() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView style={styles.container}>
-        <Surface style={styles.header} elevation={1}>
-          <Text variant="headlineSmall">Work Session</Text>
-          {currentSession && (
-            <>
-              <Text variant="bodyLarge" style={styles.time}>
-                {currentSession.start_time} - {currentSession.end_time}
-              </Text>
-              <ProgressBar
-                progress={
-                  currentSession.total_exercises > 0
-                    ? Math.round(
-                        (currentSession.completed_exercises /
-                          currentSession.total_exercises) *
-                          100
-                      ) / 100
-                    : 0
-                }
-                style={styles.progress}
-              />
-              <Text variant="bodyMedium">
-                {currentSession.completed_exercises} of{" "}
-                {currentSession.total_exercises} exercises completed
-              </Text>
-            </>
-          )}
-        </Surface>
-
-        {renderExerciseList()}
-
-        {currentSession?.total_exercises > 0 && nextExercise && (
-          <Card style={styles.card}>
-            <Card.Title title="Next Exercise" />
-            <Card.Content>
-              <Text variant="titleMedium">{nextExercise.name}</Text>
-              <Text variant="bodyMedium">{nextExercise.duration}</Text>
-              <Text variant="bodyMedium" style={styles.description}>
-                {nextExercise.description}
-              </Text>
-              <Button
-                mode="contained"
-                onPress={handleStartExercise}
-                style={styles.button}
-              >
-                Start Exercise
-              </Button>
-            </Card.Content>
-          </Card>
-        )}
-
-        {!workSchedule && (
-          <Card style={styles.card}>
-            <Card.Title title="Setup Required" />
-            <Card.Content>
-              <Text variant="bodyMedium">
-                Please set up your work schedule to get personalized exercise
-                recommendations.
-              </Text>
+        <Card style={styles.statusCard}>
+          <Card.Content>
+            <Text variant="titleMedium">Work Mode</Text>
+            {workSchedule ? (
+              <>
+                <Text variant="bodyMedium" style={styles.scheduleText}>
+                  Working Hours: {workSchedule.start} - {workSchedule.end}
+                </Text>
+                <Text variant="bodyMedium" style={styles.nextBreak}>
+                  Next Break: {timeUntilNext}
+                  {nextExercise && ` - ${nextExercise}`}
+                </Text>
+              </>
+            ) : (
               <Button
                 mode="contained"
                 onPress={() => router.push("/(app)/profile/edit")}
-                style={styles.button}
+                style={styles.scheduleButton}
               >
-                Set Up Schedule
+                Set Work Schedule
               </Button>
-            </Card.Content>
-          </Card>
-        )}
+            )}
+          </Card.Content>
+        </Card>
+
+        <Card style={styles.issuesCard}>
+          <Card.Title title="Common Issues to Address" />
+          <Card.Content>
+            {professionData?.common_issues?.length > 0 ? (
+              professionData.common_issues.map((issue, index) => (
+                <Text key={index} style={styles.issueText}>
+                  • {issue.issue} ({issue.severity} priority)
+                </Text>
+              ))
+            ) : (
+              <Text>No common issues identified for your profession.</Text>
+            )}
+          </Card.Content>
+        </Card>
+
+        <Card style={styles.exercisesCard}>
+          <Card.Title
+            title="Recommended Exercises"
+            subtitle={`Based on ${userProfession || "your"} needs`}
+          />
+          <Card.Content>
+            <View style={styles.exerciseList}>
+              {professionExercises?.length > 0 ? (
+                professionExercises.map((exercise) => (
+                  <ExerciseItem
+                    key={exercise.id}
+                    title={exercise.name}
+                    duration={`${exercise.duration_minutes} min`}
+                    description={exercise.description}
+                    reason={exercise.reason}
+                    frequency={exercise.recommended_frequency}
+                    onPress={() => startQuickExercise(exercise.name)}
+                  />
+                ))
+              ) : (
+                <Text>No exercises available for your profession yet.</Text>
+              )}
+            </View>
+          </Card.Content>
+        </Card>
+
+        <Card style={styles.statsCard}>
+          <Card.Title title="Today's Progress" />
+          <Card.Content>
+            <Text>Breaks Taken: {breaksTaken}/4</Text>
+            <Text>Active Minutes: {activeMinutes}</Text>
+            <Text>Next Suggested Break: {nextExercise}</Text>
+          </Card.Content>
+        </Card>
+
+        <Card style={styles.feedbackCard}>
+          <Card.Title title="Profession Feedback" />
+          <Card.Content>
+            {isLoading ? (
+              <Text>Loading feedback...</Text>
+            ) : (
+              <Text>{feedback}</Text>
+            )}
+            {error && (
+              <Text style={styles.errorText}>
+                {error}
+                <Button onPress={clearError}>Dismiss</Button>
+              </Text>
+            )}
+          </Card.Content>
+        </Card>
       </ScrollView>
     </SafeAreaView>
   );
 }
+
+// Update ExerciseItem to include description
+const ExerciseItem = ({
+  title,
+  duration,
+  description,
+  reason,
+  frequency,
+  onPress,
+}) => (
+  <Surface style={styles.exerciseItem}>
+    <TouchableRipple onPress={onPress}>
+      <View style={styles.exerciseContent}>
+        <View style={styles.exerciseInfo}>
+          <Text variant="titleMedium">{title}</Text>
+          <Text variant="bodySmall" style={styles.description}>
+            {description}
+          </Text>
+        </View>
+        <Text variant="bodyMedium">{duration}</Text>
+      </View>
+    </TouchableRipple>
+  </Surface>
+);
 
 const styles = StyleSheet.create({
   safeArea: {
@@ -368,60 +568,101 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  centered: {
-    justifyContent: "center",
-    alignItems: "center",
+  statusCard: {
+    margin: 15,
+    marginBottom: 10,
+    backgroundColor: "#E8EAF6",
   },
-  header: {
+  scheduleText: {
     marginTop: 10,
-    marginHorizontal: 15,
-    padding: 20,
-    backgroundColor: "white",
-    alignItems: "center",
-    borderRadius: 10,
-  },
-  time: {
-    marginTop: 5,
     opacity: 0.7,
   },
-  progress: {
-    width: "100%",
-    height: 8,
-    marginVertical: 10,
+  statusText: {
+    marginTop: 5,
+    fontWeight: "bold",
   },
-  card: {
+  activeStatus: {
+    color: "#4CAF50",
+    fontWeight: "bold",
+    marginTop: 5,
+  },
+  inactiveStatus: {
+    color: "#757575",
+    marginTop: 5,
+  },
+  scheduleButton: {
+    marginTop: 10,
+  },
+  workoutCard: {
     margin: 15,
     marginTop: 10,
   },
-  description: {
-    marginTop: 5,
+  emptyCard: {
+    margin: 15,
+    marginTop: 10,
+    backgroundColor: "#FFF3E0",
+  },
+  emptyText: {
+    textAlign: "center",
+    opacity: 0.7,
     marginBottom: 15,
   },
-  button: {
+  createButton: {
     marginTop: 10,
   },
-  quickExercises: {
-    flexDirection: "row",
-    justifyContent: "space-around",
-    marginTop: 10,
-  },
-  exerciseButton: {
-    marginVertical: 5,
-  },
-  nextExercise: {
+  continueButton: {
     marginTop: 15,
-    marginBottom: 10,
+  },
+  exercisesCard: {
+    margin: 15,
+    marginTop: 10,
+  },
+  exerciseList: {
+    marginTop: 10,
+    gap: 10,
   },
   exerciseItem: {
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: "#eee",
+    borderRadius: 8,
+    elevation: 2,
   },
-  exerciseDetail: {
+  exerciseContent: {
+    padding: 15,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  nextBreak: {
+    marginTop: 10,
+    fontWeight: "bold",
+  },
+  statsCard: {
+    margin: 15,
+    marginTop: 10,
+  },
+  exerciseText: {
+    marginBottom: 10,
+  },
+  exerciseInfo: {
+    flex: 1,
+    marginRight: 10,
+  },
+  description: {
     opacity: 0.7,
     marginTop: 4,
   },
-  deleteButton: {
-    marginLeft: 10,
+  issuesCard: {
+    margin: 15,
+    marginTop: 10,
+  },
+  issueText: {
+    marginBottom: 5,
+  },
+  feedbackCard: {
+    margin: 15,
+    marginTop: 10,
+  },
+  errorText: {
+    color: "red",
+    marginTop: 10,
   },
 });

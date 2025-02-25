@@ -19,6 +19,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [hasCompletedProfile, setHasCompletedProfile] = useState(false);
+  const [initialized, setInitialized] = useState(false);
+
+  const checkProfileCompletion = async (userId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from("users")
+        .select("profession_id")
+        .eq("id", userId)
+        .maybeSingle();
+
+      if (error && error.code !== "PGRST116") {
+        console.error("Error checking profile completion:", error);
+        return;
+      }
+
+      setHasCompletedProfile(!!data?.profession_id);
+    } catch (error) {
+      console.error("Error checking profile completion:", error);
+    }
+  };
 
   useEffect(() => {
     // Single function to handle session updates
@@ -28,6 +48,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (newSession?.user) {
         await checkProfileCompletion(newSession.user.id);
       }
+      setInitialized(true);
     };
 
     // Initialize auth state
@@ -40,8 +61,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await handleSession(initialSession);
       } catch (error) {
         console.error("Auth initialization error:", error);
+        setInitialized(true);
       } finally {
-        console.log("Setting loading to false");
         setLoading(false);
       }
     };
@@ -63,24 +84,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const checkProfileCompletion = async (userId: string) => {
-    try {
-      const { data, error } = await supabase
-        .from("users")
-        .select("profession_id")
-        .eq("id", userId)
-        .maybeSingle();
-
-      if (error && error.code !== "PGRST116") {
-        console.error("Error checking profile completion:", error);
-        return;
-      }
-
-      setHasCompletedProfile(!!data?.profession_id);
-    } catch (error) {
-      console.error("Error checking profile completion:", error);
-    }
-  };
+  if (!initialized) {
+    return null;
+  }
 
   const signUp = async (email: string, password: string) => {
     const { data: authData, error: authError } = await supabase.auth.signUp({

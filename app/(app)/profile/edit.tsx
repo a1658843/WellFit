@@ -6,11 +6,16 @@ import {
   HelperText,
   Surface,
   Snackbar,
+  Card,
+  List,
+  RadioButton,
 } from "react-native-paper";
 import { useState, useEffect } from "react";
 import { supabase } from "../../../lib/supabase";
 import { useAuth } from "../../../contexts/AuthContext";
 import { useRouter } from "expo-router";
+import { useAITrainer } from "../../../contexts/AITrainerContext";
+import { PROFESSIONS } from "../../../data/professions";
 
 type Profession = {
   id: number;
@@ -32,10 +37,12 @@ export default function EditProfile() {
   const [professions, setProfessions] = useState<Profession[]>([]);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [fullName, setFullName] = useState("");
-  const [selectedProfession, setSelectedProfession] = useState<number | null>(
-    null
-  );
+  const [selectedProfession, setSelectedProfession] = useState("");
   const [visible, setVisible] = useState(false);
+  const [customProfession, setCustomProfession] = useState("");
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [analyzing, setAnalyzing] = useState(false);
+  const { analyzeNewProfession } = useAITrainer();
 
   useEffect(() => {
     Promise.all([loadProfessions(), loadUserProfile()]).finally(() =>
@@ -86,7 +93,7 @@ export default function EditProfile() {
         ...userData,
       });
       setFullName(profileData?.full_name || "");
-      setSelectedProfession(userData.profession_id);
+      setSelectedProfession(userData.profession_id?.toString() || "");
     } catch (error) {
       console.error("Error loading profile:", error);
       alert("Failed to load profile. Please try again.");
@@ -94,41 +101,131 @@ export default function EditProfile() {
   };
 
   const handleSave = async () => {
-    if (!session?.user?.id) return;
+    if (!selectedProfession || !session?.user) return;
 
     try {
-      setSaving(true);
+      setLoading(true);
+      const professionData = PROFESSIONS.find(
+        (p) => p.name === selectedProfession
+      );
 
-      // Update user profile
-      const { error: profileError } = await supabase
-        .from("user_profiles")
-        .upsert({
-          id: session.user.id,
-          full_name: fullName,
-          updated_at: new Date().toISOString(),
-        });
+      if (!professionData) {
+        console.error("Invalid profession selected");
+        return;
+      }
 
-      if (profileError) throw profileError;
-
-      // Update profession
-      const { error: userError } = await supabase
+      const { error } = await supabase
         .from("users")
         .update({
-          profession_id: selectedProfession,
+          profession_data: professionData,
+          profession_validated: true,
         })
         .eq("id", session.user.id);
 
-      if (userError) throw userError;
+      if (error) throw error;
 
-      // Show snackbar briefly and navigate back
+      // Reload profile data to reflect changes
+      await loadUserProfile();
+
+      setVisible(true);
+      setTimeout(() => {
+        router.push("/(app)/(tabs)/profile");
+      }, 1000);
+    } catch (error) {
+      console.error("Error saving profession:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleProfessionInput = async (text: string) => {
+    setCustomProfession(text);
+
+    try {
+      // Check for existing professions as suggestions
+      const { data } = await supabase
+        .from("professions")
+        .select("id, name")
+        .ilike("name", `${text}%`)
+        .limit(5);
+
+      // Remove duplicates and ensure unique suggestions
+      const uniqueSuggestions = Array.from(
+        new Set(data?.map((p) => p.name) || [])
+      );
+      setSuggestions(uniqueSuggestions);
+    } catch (error) {
+      console.error("Error getting suggestions:", error);
+    }
+  };
+
+  const handleCustomProfession = async () => {
+    if (!customProfession.trim()) return;
+
+    try {
+      setAnalyzing(true);
+      setSaving(true);
+
+      // Get profession analysis from AI
+      const analysis = await analyzeNewProfession(customProfession);
+      console.log("Raw analysis:", analysis); // Debug log
+
+      if (!analysis) {
+        throw new Error("Failed to analyze profession");
+      }
+
+      // Create or update profession
+      const professionData = {
+        name: customProfession,
+        category: analysis.category,
+        health_risks: analysis.health_risks,
+        common_issues: analysis.exercise_recommendations.focus_areas.map(
+          (area) => ({
+            issue: area,
+            severity: "medium",
+          })
+        ),
+        work_characteristics: analysis.characteristics,
+      };
+      console.log("Profession data to insert:", professionData); // Debug log
+
+      const { data: profession, error: professionError } = await supabase
+        .from("professions")
+        .insert([professionData])
+        .select()
+        .single();
+
+      if (professionError) throw professionError;
+
+      // Update user's profession
+      if (profession?.id) {
+        const workMode = analysis.characteristics.workplace.some(
+          (w) => w.toLowerCase() === "active"
+        )
+          ? "active"
+          : "sedentary";
+
+        const { error: userError } = await supabase
+          .from("users")
+          .update({
+            profession_id: profession.id,
+            work_mode: workMode,
+          })
+          .eq("id", session?.user?.id);
+
+        if (userError) throw userError;
+      }
+
+      // Show success message
       setVisible(true);
       setTimeout(() => {
         router.back();
-      }, 1000);
+      }, 1500);
     } catch (error) {
-      console.error("Error updating profile:", error);
-      alert("Failed to update profile. Please try again.");
+      console.error("Error saving profession:", error);
+      alert("Failed to save profession. Please try again.");
     } finally {
+      setAnalyzing(false);
       setSaving(false);
     }
   };
@@ -155,44 +252,48 @@ export default function EditProfile() {
             onChangeText={setFullName}
             mode="outlined"
             style={styles.input}
-            placeholder="Enter your name"
           />
 
           <Text variant="bodyMedium" style={styles.label}>
-            Profession
+            Your Profession
           </Text>
-          <ScrollView horizontal style={styles.professionList}>
-            {professions.map((profession) => (
-              <Button
-                key={profession.id}
-                mode={
-                  selectedProfession === profession.id
-                    ? "contained"
-                    : "outlined"
-                }
-                onPress={() => setSelectedProfession(profession.id)}
-                style={styles.professionButton}
-              >
-                {profession.name}
-              </Button>
+
+          <RadioButton.Group
+            onValueChange={(value) => setSelectedProfession(value)}
+            value={selectedProfession}
+          >
+            {PROFESSIONS.map((profession) => (
+              <List.Item
+                key={profession.name}
+                title={profession.name}
+                description={profession.category}
+                onPress={() => setSelectedProfession(profession.name)}
+                left={(props) => (
+                  <RadioButton {...props} value={profession.name} />
+                )}
+                style={[
+                  styles.listItem,
+                  selectedProfession === profession.name && styles.selectedItem,
+                ]}
+              />
             ))}
-          </ScrollView>
+          </RadioButton.Group>
 
           <Button
             mode="contained"
             onPress={handleSave}
+            loading={loading}
+            disabled={!selectedProfession || loading}
             style={styles.button}
-            loading={saving}
-            disabled={saving}
           >
-            Save Changes
+            Save
           </Button>
 
           <Button
             mode="outlined"
             onPress={() => router.back()}
             style={styles.button}
-            disabled={saving}
+            disabled={loading}
           >
             Cancel
           </Button>
@@ -202,7 +303,7 @@ export default function EditProfile() {
       <Snackbar
         visible={visible}
         onDismiss={() => setVisible(false)}
-        duration={1000}
+        duration={1500}
       >
         Profile updated successfully
       </Snackbar>
@@ -234,13 +335,26 @@ const styles = StyleSheet.create({
   label: {
     marginBottom: 10,
   },
-  professionList: {
-    marginBottom: 20,
+  suggestionsCard: {
+    marginTop: -10,
+    marginBottom: 10,
   },
-  professionButton: {
-    marginRight: 10,
+  suggestionButton: {
+    justifyContent: "flex-start",
+    paddingVertical: 4,
   },
   button: {
     marginTop: 10,
+  },
+  list: {
+    flex: 1,
+  },
+  listItem: {
+    borderRadius: 8,
+    marginBottom: 8,
+    backgroundColor: "white",
+  },
+  selectedItem: {
+    backgroundColor: "#e8f5e9",
   },
 });

@@ -1,90 +1,112 @@
 import { View, StyleSheet, ScrollView, SafeAreaView } from "react-native";
 import { Button, Text, Surface, List } from "react-native-paper";
 import { useAuth } from "../../../contexts/AuthContext";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { supabase } from "../../../lib/supabase";
-import { useRouter, useFocusEffect } from "expo-router";
+import { useRouter } from "expo-router";
 
 export default function Profile() {
   const { signOut, session } = useAuth();
+  const router = useRouter();
   const [profile, setProfile] = useState<{
     name: string;
     profession: string;
     email: string;
   } | null>(null);
-  const router = useRouter();
+  const [loading, setLoading] = useState(true);
 
-  useFocusEffect(
-    useCallback(() => {
-      if (session?.user) {
-        loadProfile();
-      }
-    }, [session])
-  );
+  useEffect(() => {
+    if (session?.user) {
+      loadUserProfile();
+    }
+  }, [session]);
 
-  const loadProfile = async () => {
-    if (!session?.user) return;
-
+  const loadUserProfile = async () => {
     try {
-      const { data: profileData } = await supabase
+      setLoading(true);
+
+      // First get user profile data (for full name)
+      const { data: profileData, error: profileError } = await supabase
         .from("user_profiles")
         .select("full_name")
-        .eq("id", session.user.id)
+        .eq("id", session?.user?.id)
         .single();
 
-      const { data: userData } = await supabase
+      if (profileError && profileError.code !== "PGRST116") {
+        throw profileError;
+      }
+
+      // Then get profession data
+      const { data: userData, error: userError } = await supabase
         .from("users")
         .select(
           `
-          professions:profession_id (
-            name
-          )
+          email,
+          profession_data
         `
         )
-        .eq("id", session.user.id)
+        .eq("id", session?.user?.id)
         .single();
 
+      if (userError) throw userError;
+
+      // Set profile with all available data
       setProfile({
-        name: profileData?.full_name || "Not set",
-        profession: userData?.professions?.name || "Not set",
-        email: session.user.email || "",
+        name:
+          profileData?.full_name ||
+          session?.user?.email?.split("@")[0] ||
+          "User",
+        profession: userData?.profession_data?.name || "No profession selected",
+        email: userData?.email || "",
       });
     } catch (error) {
       console.error("Error loading profile:", error);
+    } finally {
+      setLoading(false);
     }
   };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut();
+      router.replace("/(auth)/welcome");
+    } catch (error) {
+      console.error("Error signing out:", error);
+    }
+  };
+
+  if (loading) {
+    return (
+      <View style={[styles.container, styles.centered]}>
+        <Text>Loading...</Text>
+      </View>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView style={styles.container}>
-        <Surface style={styles.header} elevation={1}>
+        <Surface style={styles.profileCard}>
           <Text variant="headlineMedium" style={styles.name}>
-            {profile?.name}
+            {profile?.name || "User"}
           </Text>
-          <Text variant="bodyLarge" style={styles.profession}>
-            {profile?.profession}
+          <Text variant="titleLarge" style={styles.profession}>
+            {profile?.profession || "No profession selected"}
           </Text>
         </Surface>
 
-        <List.Section>
-          <List.Item
-            title="Edit Profile"
-            left={(props) => <List.Icon {...props} icon="account-edit" />}
-            onPress={() => router.push("/(app)/profile/edit")}
-          />
-          <List.Item
-            title="Email"
-            description={profile?.email}
-            left={(props) => <List.Icon {...props} icon="email" />}
-          />
-          {/* Add more settings/options here */}
-        </List.Section>
+        <Button
+          mode="contained"
+          onPress={() => router.push("/(app)/profile/edit")}
+          style={styles.editButton}
+        >
+          Edit Profile
+        </Button>
 
         <Button
           mode="outlined"
-          onPress={signOut}
+          onPress={handleSignOut}
           style={styles.signOutButton}
-          icon="logout"
         >
           Sign Out
         </Button>
@@ -101,19 +123,27 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  header: {
-    marginTop: 10,
-    marginHorizontal: 15,
-    padding: 20,
-    backgroundColor: "white",
+  centered: {
+    justifyContent: "center",
     alignItems: "center",
+  },
+  profileCard: {
+    margin: 15,
+    padding: 15,
     borderRadius: 10,
+    alignItems: "center",
+    backgroundColor: "white",
   },
   name: {
-    marginBottom: 5,
+    marginBottom: 10,
+    fontWeight: "bold",
   },
   profession: {
-    opacity: 0.7,
+    opacity: 0.8,
+    fontSize: 20,
+  },
+  editButton: {
+    margin: 15,
   },
   signOutButton: {
     margin: 15,
